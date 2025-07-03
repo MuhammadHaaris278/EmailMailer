@@ -3,24 +3,28 @@ import smtplib
 import json
 import imaplib
 import email
-import re
-import requests
 from email.message import EmailMessage
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
-OLLAMA_API_URL = "http://localhost:11434/api/generate"
-MODEL = "codellama"
-EMAIL_REGEX = r"[^@]+@[^@]+\.[^@]+"
+# Setup OpenAI Client (GitHub GPT-4.1)
+client = OpenAI(
+    base_url="https://models.github.ai/inference",
+    api_key=os.getenv("GITHUB_TOKEN"),
+)
+model = "openai/gpt-4.1"
 
-# --- Email Sending ---
+# Define Functions
+
+
 def send_email(recipient, subject, body):
     EMAIL_ADDRESS = os.getenv("EMAIL_USER")
     EMAIL_PASSWORD = os.getenv("EMAIL_PASS")
 
     if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
-        raise ValueError("Missing email credentials.")
+        raise ValueError("Missing email credentials in environment variables.")
 
     msg = EmailMessage()
     msg["From"] = EMAIL_ADDRESS
@@ -28,186 +32,134 @@ def send_email(recipient, subject, body):
     msg["Subject"] = subject
     msg.set_content(body)
 
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-            smtp.send_message(msg)
-        print(f"\n✅ Email sent successfully to {recipient}.")
-    except Exception as e:
-        print(f"\n❌ Failed to send email: {str(e)}")
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        smtp.send_message(msg)
+        print("Email sent successfully.")
 
-# --- Email Fetching ---
+
 def get_latest_email_body():
     EMAIL_ADDRESS = os.getenv("EMAIL_USER")
     EMAIL_PASSWORD = os.getenv("EMAIL_PASS")
     IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
     IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
 
-    try:
-        mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
-        mail.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-        mail.select("inbox")
-        _, search_data = mail.search(None, 'UNSEEN')
-        email_ids = search_data[0].split()
+    mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+    mail.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+    mail.select("inbox")
 
-        if not email_ids:
-            return "No unread emails found."
+    _, search_data = mail.search(None, 'UNSEEN')
+    email_ids = search_data[0].split()
 
-        latest_id = email_ids[-1]
-        _, msg_data = mail.fetch(latest_id, "(RFC822)")
-        raw_email = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email)
+    if not email_ids:
+        return "No unread emails found."
 
-        for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                return part.get_payload(decode=True).decode("utf-8")
+    latest_id = email_ids[-1]
+    _, msg_data = mail.fetch(latest_id, "(RFC822)")
+    raw_email = msg_data[0][1]
+    msg = email.message_from_bytes(raw_email)
 
-        return "Couldn't extract email body."
-    except Exception as e:
-        return f"❌ Failed to fetch email: {str(e)}"
+    for part in msg.walk():
+        if part.get_content_type() == "text/plain":
+            return part.get_payload(decode=True).decode("utf-8")
 
-# --- LLaMA Prompt ---
-def llama_prompt(prompt: str):
-    res = requests.post(OLLAMA_API_URL, json={
-        "model": MODEL,
-        "prompt": prompt,
-        "stream": False
-    })
-    return res.json()["response"].strip()
+    return "Couldn't extract email body."
 
-# --- Email Fallback Subject/Body Generator ---
-def complete_email_fields(recipient, message_intent):
-    prompt = f"""
-You are an AI email assistant. Generate a well-written, detailed, emotionally resonant email based on the user's intent. The subject should be relevant and attention-grabbing. The body must be long, expressive, grammatically correct, and should not repeat lines.
 
-Email recipient: {recipient}
-User intent: {message_intent}
+# Tool/Function definitions
+function_definitions = [
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Send an email with subject, recipient, and body",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipient": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"}
+                },
+                "required": ["recipient", "subject", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "summarize_latest_email",
+            "description": "Fetch and summarize the latest unread email from your inbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    }
+]
 
-Return only valid JSON with the keys "subject" and "body":
-{{
-  "subject": "Subject goes here",
-  "body": "Full email content here, with paragraphs."
-}}
-"""
-    try:
-        raw = llama_prompt(prompt)
-        parsed = json.loads(raw.strip() if '```' not in raw else raw.split('```json')[-1].split('```')[0])
-        return parsed.get("subject", ""), parsed.get("body", "")
-    except:
-        return "", ""
+# Main chatbot loop
+while True:
+    user_prompt = input("\n💬 What would you like to do? \n\n-> ").strip()
 
-# --- Validation ---
-def is_valid_email_args(args):
-    return (
-        re.match(EMAIL_REGEX, args.get("recipient", "")) and
-        args.get("subject") and
-        args.get("body") and
-        "[Your Name]" not in args["body"]
+    # Step 1: Classify Intent
+    intent_check = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are an intent classifier. "
+                    "Only respond with one of the following: 'send_email', 'summarize_latest_email', or 'none'."
+                )
+            },
+            {"role": "user", "content": user_prompt}
+        ]
+    )
+    intent = intent_check.choices[0].message.content.strip().lower()
+
+    if intent not in ["send_email", "summarize_latest_email"]:
+        print("\nSorry, I cannot help you with that.")
+        print("I am here to either *Send an email* or *Summarize the latest one in your inbox.*")
+        continue
+
+    # Step 2: Let GPT attempt tool calling
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": "You can only assist with sending emails or summarizing the latest email. Use the appropriate tool functions only."
+            },
+            {"role": "user", "content": user_prompt}
+        ],
+        tools=function_definitions,
+        tool_choice="auto",
     )
 
-# --- Prompt Instruction ---
-instruction = """
-You are a strict assistant that only handles two tasks:
-1. Sending an email
-2. Summarizing the latest unread email
+    choice_msg = response.choices[0].message
 
-User instructions will be in natural language.
+    if choice_msg.tool_calls:
+        tool_call = choice_msg.tool_calls[0]
+        function_name = tool_call.function.name
+        arguments = json.loads(tool_call.function.arguments)
 
-Respond ONLY with JSON:
-- If unrelated: {"function": "none"}
-- If summarizing latest email: {"function": "summarize_latest_email"}
-- If sending email (with recipient, subject, body): 
-  {
-    "function": "send_email",
-    "args": {
-      "recipient": "EMAIL_HERE",
-      "subject": "SUBJECT_HERE",
-      "body": "BODY_HERE"
-    }
-  }
-- If fields are missing: 
-  {
-    "function": "ask_missing_info",
-    "missing": ["recipient", "subject", "body"]
-  }
-
-NEVER invent info. NEVER return anything other than the required JSON.
-"""
-
-# --- Main Loop ---
-if __name__ == "__main__":
-    while True:
-        user_input = input("\n💬 What would you like to do?\n\n-> ").strip().lower()
-
-        if user_input in ["quit", "exit", "q"]:
-            print("\n👋 Goodbye!")
+        if function_name == "send_email":
+            send_email(**arguments)
             break
 
-        full_prompt = instruction + "\n\nUser: " + user_input
+        elif function_name == "summarize_latest_email":
+            email_body = get_latest_email_body()
+            summary = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system",
+                        "content": "You are an assistant that summarizes emails."},
+                    {"role": "user", "content": f"Summarize this email:\n\n{email_body}"}
+                ]
+            )
+            print("\nEmail Summary:\n", summary.choices[0].message.content)
+            break
 
-        try:
-            raw = llama_prompt(full_prompt)
-
-            if '```' in raw:
-                raw_json = raw.split('```json')[-1].split('```')[0]
-            else:
-                raw_json = raw
-
-            parsed = json.loads(raw_json.strip())
-            func = parsed.get("function", "none")
-
-            if func == "send_email":
-                args = parsed.get("args", {})
-                if not is_valid_email_args(args):
-                    print("⚠️ LLaMA response incomplete. Attempting to regenerate subject/body...")
-
-                    recipient = args.get("recipient", "")
-                    prompt_as_intent = user_input.replace(recipient, "").strip()
-
-                    subject, body = complete_email_fields(recipient, prompt_as_intent)
-
-                    if not re.match(EMAIL_REGEX, recipient) or not subject or not body:
-                        print("❌ Still couldn't generate a valid email. Please try again.")
-                        continue
-
-                    print(f"\n📧 Ready to send the following email:")
-                    print(f"To: {recipient}")
-                    print(f"Subject: {subject}")
-                    print(f"Body:\n{body}\n")
-
-                    confirm = input("Send this email? (y/n): ").strip().lower()
-                    if confirm != 'y':
-                        print("❌ Cancelled.")
-                        continue
-
-                    send_email(recipient, subject, body)
-                else:
-                    send_email(**args)
-
-            elif func == "summarize_latest_email":
-                email_body = get_latest_email_body()
-                if email_body.startswith("❌"):
-                    print(email_body)
-                    continue
-                summary = llama_prompt(f"Summarize this email:\n\n{email_body}")
-                print("\n📬 Email Summary:\n", summary)
-
-            elif func == "ask_missing_info":
-                missing = parsed.get("missing", [])
-                completed_args = {}
-
-                for field in missing:
-                    value = input(f"Enter {field}: ").strip()
-                    completed_args[field] = value
-
-                if is_valid_email_args(completed_args):
-                    send_email(**completed_args)
-                else:
-                    print("❌ Provided values were not valid for email sending.")
-
-            else:
-                print("\n⚠️ Sorry, I can only *send an email* or *summarize your latest email*.")
-
-        except Exception as e:
-            print("\n❌ Something went wrong.")
-            print("Reason:", str(e))
+    else:
+        # GPT didn't call the function yet, continue interaction
+        print("\n💬 Assistant's response:\n", choice_msg.content)
