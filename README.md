@@ -85,8 +85,7 @@ python practice.py
 - If the function involves sending an email, the assistant collects the necessary details and sends the email via SMTP.
 - If the user wants a summary, the assistant retrieves the latest unread email and summarizes it using GPT-4.1.
 
-## Conclusion
+## 👤 Author
 
-This system is a simple but powerful way to automate email communication using natural language processing and function calling techniques from LLaMA and OpenAI's GPT models.
-
-Feel free to modify and extend this system for different use cases, such as integrating it with a database or expanding the types of emails it can generate.
+Built by Haaris  
+AI Engineer Intern @ Kryptomind
